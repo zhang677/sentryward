@@ -10,10 +10,24 @@ both, orchestrated from `cpp/src/frontend/ptx/run.cpp`.
 ## 1. Frontend: specialize the kernel
 
 The PTX is parsed and run symbolically for the fixed launch configuration and
-problem sizes in `input.json`, one CTA at a time. Everything that depends on the
-configuration (grid, thread IDs, loop bounds) becomes concrete. What's left is a
-per-thread stream of events: barrier and mbarrier ops, TMA, `tcgen05`, loads and
-stores.
+problem sizes in `input.json`. Everything that depends on the configuration
+(grid, thread IDs, loop bounds) becomes concrete. What's left is a per-thread
+stream of events: barrier and mbarrier ops, TMA, `tcgen05`, loads and stores.
+
+Specialization runs one CTA at a time when it can (the grid loop in `run.cpp`).
+If a CTA's control flow depends on shared state that another CTA writes, such
+as a `shared::cluster` load or a cluster mbarrier, the standalone run fails
+with a `shared_control` error. The frontend then re-runs the whole cluster
+together (`SpecializeCluster` in `cpp/src/frontend/ptx/execution.cpp`), stepping
+its CTAs against one shared runtime. Only specialization is split up this way.
+Every CTA's events go into one program with their CTA IDs (`AddCta`), and all
+later checks run on that program for the whole grid. A remote arrive from one
+CTA on another CTA's mbarrier is therefore an ordinary synchronization edge.
+
+Synchronization across clusters through global memory is not modeled. A spin
+loop on a global flag fails as `branch_not_static` or
+`polling_wait_not_modeled`, so stream-K-style semaphores and grid barriers built
+by hand are reported as `unsupported`.
 
 Anything it can't handle is reported as `unsupported`, never silently
 approximated. Examples are branches that depend on tensor data, election, CLC
