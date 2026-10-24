@@ -185,6 +185,50 @@ ol.log li.event-phase.bad { color: var(--bad); }
 .query { display: flex; flex-direction: column; gap: 6px; }
 ol.witness { margin: 0; padding-left: 22px; font-family: var(--font-mono); font-size: 13px; }
 
+/* six phases: time runs downward, a sticky panel sits beside the graph */
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table.lower { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 14px; }
+.lower th, .lower td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.lower tr:last-child td { border-bottom: 0; }
+.lower th { font-weight: 600; color: var(--muted); font-size: 12.5px; }
+.lower td:first-child { font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; }
+.sixgrid { display: grid; grid-template-columns: minmax(0, 640px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .sixgrid { grid-template-columns: minmax(0, 1fr); } }
+.sixpanel { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+@media (max-width: 1000px) { .sixpanel { position: static; max-height: none; } }
+#g-six { min-width: 630px; }
+#g-six .lbl { font-size: 10px; }
+.node .fx { fill: var(--muted); }
+.node .fx.tx { fill: var(--tx); }
+.n-done .fx, .n-done .fx.tx { fill: var(--on-accent); }
+.node .badge circle { fill: var(--accent-soft); }
+.node .badge text { fill: var(--accent); font: 600 9.5px var(--font-mono); }
+.node .badge.w circle { fill: var(--sync-soft); }
+.node .badge.w text { fill: var(--sync); }
+.n-done .badge circle { fill: var(--on-accent); }
+.n-blocked rect { stroke: var(--sync); stroke-width: 1.8; stroke-dasharray: 4 3; }
+.round-rule { stroke: var(--line); stroke-dasharray: 2 4; }
+.ctable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ctable th, .ctable td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.ctable th { color: var(--muted); font-weight: 500; }
+.ctable td:first-child { font-family: var(--font-mono); white-space: nowrap; }
+.ctable tr.diff td { background: var(--bad-soft); color: var(--bad); }
+.plist { display: flex; flex-direction: column; gap: 6px; }
+.prow {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px; text-align: left;
+  font: inherit; font-size: 14px; color: inherit; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 12px; cursor: pointer;
+}
+.prow[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.prow:disabled { cursor: default; opacity: .6; }
+.prow:focus-visible, .qrow:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pill.warn { background: var(--sync-soft); color: var(--sync); }
+.detail { display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.detail .k { font-weight: 600; }
+.qrow { display: block; width: 100%; text-align: left; font: inherit; font-size: 13.5px; color: inherit; background: var(--band); border: 1px solid transparent; border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+.qrow[aria-pressed="true"] { border-color: var(--accent); }
+.qrow.bad { background: var(--bad-soft); color: var(--bad); }
+
 footer { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; border-top: 1px solid var(--line); padding-top: 28px; }
 @media (max-width: 760px) { footer { grid-template-columns: minmax(0, 1fr); } }
 footer ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
@@ -292,6 +336,60 @@ footer h3 { margin-bottom: 10px; }
     <div id="after-result" class="query"></div>
   </section>
 
+  <section>
+    <div class="step">Step 5</div>
+    <h2>Six phases on one barrier, and why the solver is needed</h2>
+    <div class="prose">
+      <p>Steps 1–4 checked a single phase. Real kernels reuse a barrier for many phases, so before it can prove anything the checker has to decide which effects belong to which phase. This kernel uses one barrier, <code>full</code>, for six rounds of a two-slot pipeline. In round k the producer loads tile k into slot k mod 2 and the consumer reads it. The consumer's arrive in round k says it has finished reading tile k−1, so that slot can be refilled in round k+1. Each phase expects two arrivals, one from each thread.</p>
+      <p>The two versions differ in one line: the order of the producer's <code>expect_tx</code> and <code>arrive</code>.</p>
+    </div>
+    <div class="switch" role="group" aria-label="Six-phase kernel version">
+      <button type="button" id="sx-ok" aria-pressed="true">Correct: expect_tx, then arrive</button>
+      <button type="button" id="sx-bug" aria-pressed="false">Buggy: arrive, then expect_tx</button>
+    </div>
+    <pre id="six-code"></pre>
+
+    <h3>Issue events and done events</h3>
+    <div class="prose">
+      <p>Steps 1–4 drew each instruction as one box. Here every event is drawn on its own, the way SentryWard lowers the kernel. The six rounds are unrolled, so the graph holds six copies of each line.</p>
+    </div>
+    <div class="tablewrap">
+      <table class="lower">
+        <thead><tr><th>Instruction</th><th>Events</th><th>Effect on the barrier</th><th>The next instruction starts after</th></tr></thead>
+        <tbody>
+          <tr><td>mbarrier.expect_tx</td><td>one event</td><td>+1024 bytes pending</td><td>that event</td></tr>
+          <tr><td>mbarrier.arrive</td><td>one event</td><td>−1 pending arrival</td><td>that event</td></tr>
+          <tr><td>cp.async.bulk.tensor</td><td>issue, then done on the async lane</td><td>The done removes 1024 bytes (<code>complete_tx</code>) and is the moment the tile is written to shared memory.</td><td>the issue: the thread does not wait for the copy</td></tr>
+          <tr><td>mbarrier.try_wait.parity</td><td>issue, then done</td><td>No effect. The issue fixes which phase the wait targets: parity p means the current phase if its number has parity p, otherwise the previous phase. The done can run only after that phase completes.</td><td>the done</td></tr>
+          <tr><td>ld.shared</td><td>issue, then done</td><td>No effect. The read happens at the done.</td><td>the done</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Every issue → done edge is in the graph from the start. Once a phase is proven, the checker adds an edge from its completion node to the done of each wait that observes it, never to the issue. In this kernel, a wait done is the only place where one thread learns what the other thread did. Round labels follow the producer; the consumer's events for a round sit a few rows lower.</p>
+    </div>
+
+    <div class="legend">
+      <span><svg viewBox="0 0 34 10"><line x1="0" y1="5" x2="34" y2="5" class="edge e-po"/></svg>program order, issue → done</span>
+      <span><svg viewBox="0 0 34 10"><line x1="0" y1="5" x2="34" y2="5" class="edge e-async"/></svg>TMA issue → TMA done</span>
+      <span><svg viewBox="0 0 34 10"><line x1="0" y1="5" x2="34" y2="5" class="edge e-sync"/></svg>added after a phase is proven</span>
+      <span><svg viewBox="0 0 18 18" style="width:18px;height:18px"><circle cx="9" cy="9" r="8" style="fill:var(--accent-soft)"/><text x="9" y="12.5" text-anchor="middle" style="fill:var(--accent);font:600 9.5px var(--font-mono)">2</text></svg>phase the effect landed in</span>
+      <span><svg viewBox="0 0 18 18" style="width:18px;height:18px"><circle cx="9" cy="9" r="8" style="fill:var(--sync-soft)"/><text x="9" y="12.5" text-anchor="middle" style="fill:var(--sync);font:600 9.5px var(--font-mono)">2</text></svg>phase the wait targets</span>
+    </div>
+    <div class="switch" role="group" aria-label="Step 5 view">
+      <button type="button" id="sx-tab-ref" aria-pressed="true">1 · Reference run</button>
+      <button type="button" id="sx-tab-check" aria-pressed="false">2 · Check each phase</button>
+    </div>
+    <div class="sixgrid">
+      <div class="scroll"><svg id="g-six" role="img" aria-label="Event graph of the six-round kernel, time running downward"></svg></div>
+      <div class="sixpanel card" id="six-panel"></div>
+    </div>
+    <div class="callout">
+      <h3>Why the solver is needed</h3>
+      <p id="six-why"></p>
+    </div>
+  </section>
+
   <footer>
     <div>
       <h3>Where this lives in the code</h3>
@@ -305,10 +403,10 @@ footer h3 { margin-bottom: 10px; }
     <div>
       <h3>What this page simplifies</h3>
       <ul>
-        <li>SentryWard lowers most instructions to an issue event and a done event. Each pair is drawn as one box here.</li>
+        <li>SentryWard lowers most instructions to an issue event and a done event. Steps 1–4 draw each pair as one box; Step 5 draws them separately.</li>
         <li>The solver runs on the graph projected onto the phase's effects. The other events are drawn only to show where the effects come from.</li>
         <li>The real check also rejects prefixes where the byte count goes negative, and it handles phases with arrival increments.</li>
-        <li>There is only one phase here. Later phases are checked against a graph that already contains earlier completion edges.</li>
+        <li>In Step 5, <code>mbarrier.init</code> and the <code>__syncthreads</code> that orders it before both threads are not drawn, and the wait, lifecycle and race checks are summarized in one line.</li>
         <li>The wait-freshness and barrier-lifecycle checks (<code>wait_checker.cpp</code>, <code>lifecycle_checker.cpp</code>) are not shown.</li>
       </ul>
     </div>
@@ -804,7 +902,593 @@ const tryRun = (target, fromKeyboard) => {
 playSvg.addEventListener("click", e => tryRun(e.target, false));
 playSvg.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tryRun(e.target, true); } });
 
+/* six-phase model */
+const SIX_ROUNDS = 6, SIX_EXPECTED = 2, SIX_BYTES = 1024;
+const SIX_LANES = ["T0 · producer", "TMA (async)", "phase completions", "T1 · consumer"];
+
+function sixBuild(bug) {
+  const ev = [], edges = [];
+  const add = o => { o.num = ev.length; ev.push(o); return o.id; };
+  const prog = { T0: [], T1: [] };
+  for (let k = 0; k < SIX_ROUNDS; k++) {
+    if (k > 0) prog.T0.push({ kind: "wait", k, who: "pw", parity: (k - 1) % 2 });
+    const ex = { kind: "expect", k }, ar = { kind: "arrive", k, who: "pa" };
+    prog.T0.push(...(bug ? [ar, ex] : [ex, ar]), { kind: "tma", k });
+    prog.T1.push({ kind: "arrive", k, who: "c" }, { kind: "wait", k, who: "cw", parity: k % 2 }, { kind: "ld", k });
+  }
+  for (const th of ["T0", "T1"]) {
+    const lane = th === "T0" ? 0 : 3;
+    let prev = null;
+    for (const ins of prog[th]) {
+      const k = ins.k, base = { th, lane, k };
+      let first, last;
+      if (ins.kind === "expect") {
+        first = last = add({ ...base, id: `e${k}`, name: "expect_tx", fx: "+1024", tx: SIX_BYTES, short: `T0 expect_tx·${k}` });
+      } else if (ins.kind === "arrive") {
+        first = last = add({ ...base, id: `${ins.who}${k}`, name: "arrive", fx: "−1", arr: 1, short: `${th} arrive·${k}` });
+      } else if (ins.kind === "tma") {
+        first = add({ ...base, id: `i${k}`, name: "TMA issue", short: `TMA·${k} issue` });
+        last = add({ ...base, lane: 1, id: `x${k}`, name: "TMA done", fx: "−1024", tx: -SIX_BYTES, writes: k % 2, short: `TMA·${k} done` });
+        edges.push([first, last, "id"]);
+        last = first; // TMA does not block the thread: program order continues from the issue
+      } else if (ins.kind === "wait") {
+        first = add({ ...base, id: `${ins.who}${k}i`, name: `wait p${ins.parity} · issue`, waitIssue: true, parity: ins.parity, short: `${th} wait·${k}` });
+        last = add({ ...base, id: `${ins.who}${k}d`, name: `wait p${ins.parity} · done`, waitDone: first, short: `${th} wait·${k} done` });
+        edges.push([first, last, "id"]);
+      } else {
+        first = add({ ...base, id: `r${k}i`, name: "ld.shared · issue", short: `T1 ld·${k} issue` });
+        last = add({ ...base, id: `r${k}d`, name: "ld.shared · done", reads: k % 2, tile: k, short: `T1 ld·${k} done` });
+        edges.push([first, last, "id"]);
+      }
+      if (prev) edges.push([prev, first, "po"]);
+      prev = last;
+    }
+  }
+  const P = { bug, ev, edges, byId: Object.fromEntries(ev.map(e => [e.id, e])), preds: {}, succs: {} };
+  ev.forEach(e => { P.preds[e.id] = []; P.succs[e.id] = []; });
+  edges.forEach(([f, t]) => { P.preds[t].push(f); P.succs[f].push(t); });
+  P.effects = ev.filter(e => e.arr || e.tx);
+  P.waits = ev.filter(e => e.waitIssue);
+  P.ref = sixRun(P, sixLowest);
+  P.ref.label = "SentryWard's reference run";
+  P.enumd = sixEnumerate(P);
+  sixLayout(P);
+  return P;
+}
+
+/* reference semantics: one event at a time, barrier counters as in report.md */
+function sixInit() {
+  return { done: new Set(), order: [], cur: 0, arr: SIX_EXPECTED, tx: 0, phaseOf: {}, target: {}, observed: new Set(), err: null, completedAt: [], stale: [], extra: null };
+}
+function sixEnabled(P, s, id) {
+  if (s.done.has(id) || s.err) return false;
+  if (!P.preds[id].every(p => s.done.has(p))) return false;
+  if (s.extra && s.extra[1] === id && !s.done.has(s.extra[0])) return false;
+  const e = P.byId[id];
+  return !e.waitDone || s.target[e.waitDone] < s.cur;
+}
+function sixStep(P, s, id) {
+  const e = P.byId[id];
+  s.done.add(id); s.order.push(id);
+  if (e.waitIssue) s.target[id] = e.parity === s.cur % 2 ? s.cur : s.cur - 1;
+  if (e.waitDone && s.target[e.waitDone] >= 0) s.observed.add(s.target[e.waitDone]);
+  if (e.reads !== undefined && !s.done.has(`x${e.tile}`)) s.stale.push(e.tile);
+  if (e.arr || e.tx) {
+    s.phaseOf[id] = s.cur;
+    if (e.arr) {
+      // an arrival in phase n > 0 needs some wait to have observed phase n-1 (kMissingSuccessfulWaitHandoff)
+      if (s.cur > 0 && !s.observed.has(s.cur - 1)) { s.err = `${e.short} arrived in phase ${s.cur} before any wait observed phase ${s.cur - 1}`; return; }
+      if (s.arr - e.arr < 0) { s.err = `arrival underflow at ${e.short}`; return; }
+      s.arr -= e.arr;
+    }
+    if (e.tx) s.tx += e.tx;
+    if (s.arr === 0 && s.tx === 0) { s.completedAt.push(s.order.length); s.cur++; s.arr = SIX_EXPECTED; s.tx = 0; }
+  }
+}
+const sixNext = (P, s) => P.ev.filter(e => sixEnabled(P, s, e.id));
+const sixLowest = next => next[0];
+const sixConsumerFirst = next => next.find(e => e.th === "T1") || next[0];
+const sixRandom = next => next[Math.floor(Math.random() * next.length)];
+function sixRun(P, pick, s = sixInit()) {
+  for (let next = sixNext(P, s); next.length; next = sixNext(P, s)) sixStep(P, s, pick(next).id);
+  return s;
+}
+const sixFinished = (P, s) => s.done.size === P.ev.length || !!s.err || !sixNext(P, s).length;
+function sixClassSig(P, s) {
+  return P.effects.map(e => s.phaseOf[e.id] ?? "-").join(",") + "|" + P.waits.map(w => s.target[w.id] ?? "-").join(",");
+}
+function sixEnumerate(P) {
+  const seen = new Set(), outcomes = new Map();
+  const clone = s => ({ ...s, done: new Set(s.done), order: [...s.order], phaseOf: { ...s.phaseOf }, target: { ...s.target }, observed: new Set(s.observed), completedAt: [...s.completedAt], stale: [...s.stale] });
+  const rec = s => {
+    const key = P.ev.map(e => (s.done.has(e.id) ? 1 : 0)).join("") + sixClassSig(P, s);
+    if (seen.has(key)) return;
+    seen.add(key);
+    const next = sixNext(P, s);
+    if (!next.length) { const k = sixClassSig(P, s) + (s.err || s.done.size < P.ev.length ? "!" : ""); if (!outcomes.has(k)) outcomes.set(k, s); return; }
+    for (const n of next) { const c = clone(s); sixStep(P, c, n.id); rec(c); }
+  };
+  rec(sixInit());
+  return { states: seen.size, outcomes };
+}
+function sixPhases(P, s) {
+  const out = [];
+  for (const e of P.effects) { const p = s.phaseOf[e.id]; if (p === undefined) continue; (out[p] ||= []).push(e.id); }
+  for (let i = 0; i < out.length; i++) out[i] ||= [];
+  return out;
+}
+
+/* layout: longest path over structural edges plus the edges the intended phases add */
+function sixLayout(P) {
+  const L = [...P.edges.map(([f, t]) => [f, t])];
+  const ph = sixPhases(P, P.ref);
+  ph.forEach((ids, k) => {
+    ids.forEach(id => { L.push([id, "P" + k]); if (k > 0) L.push(["P" + (k - 1), id]); });
+    P.waits.forEach(w => { if (P.ref.target[w.id] === k) L.push(["P" + k, w.id.slice(0, -1) + "d"]); });
+  });
+  const row = {};
+  [...P.ev.map(e => e.id), ...ph.map((_, k) => "P" + k)].forEach(id => (row[id] = 0));
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [f, t] of L) if (row[t] < row[f] + 1) { row[t] = row[f] + 1; changed = true; }
+  }
+  P.row = row;
+  P.rows = Math.max(...Object.values(row)) + 1;
+  P.roundRow = Array.from({ length: SIX_ROUNDS }, (_, k) => Math.min(row[`c${k}`], row[`e${k}`], row[`pa${k}`]));
+}
+
+/* the check, phase by phase in trace order, on the classification s proposes */
+function sixCheck(P, s, solver) {
+  const added = [];
+  const succ = id => [...(P.succs[id] || []), ...added.filter(a => a[0] === id).map(a => a[1])];
+  const reach = (u, v) => {
+    if (u === v) return true;
+    const seen = new Set([u]), st = [u];
+    while (st.length) { const x = st.pop(); for (const y of succ(x)) { if (y === v) return true; if (!seen.has(y)) { seen.add(y); st.push(y); } } }
+    return false;
+  };
+  const addEdge = (f, t, kind, phase) => added.push([f, t, kind, phase]);
+  const R = { phases: [], added, fail: null, undecided: [], after: null };
+  if (s.err || s.done.size < P.ev.length) {
+    R.fail = { kind: s.err ? "error" : "deadlock", text: s.err || "the reference run stopped with events left" };
+    return R;
+  }
+  const ph = sixPhases(P, s);
+  const completed = s.cur;
+  for (let n = 0; n < ph.length; n++) {
+    const E = ph[n].map(id => P.byId[id]);
+    const open = n >= completed;
+    const rec = { n, open, effects: ph[n], edgesBefore: added.length };
+    R.phases.push(rec);
+    // S: separation from the previous phase
+    if (n > 0) {
+      for (const e of E) {
+        const unordered = ph[n - 1].filter(f => !reach(f, e.id));
+        if (unordered.length) { rec.S = { ok: false, effect: e.id, unordered }; break; }
+      }
+      if (!rec.S) rec.S = { ok: true };
+      if (!rec.S.ok) { R.fail = { kind: "separation", phase: n, ...rec.S }; break; }
+      E.forEach(e => addEdge("P" + (n - 1), e.id, "prev", n));
+    } else rec.S = { ok: true, init: true };
+    rec.edgesAfterPrev = added.length;
+    const arr = E.reduce((a, e) => a + (e.arr || 0), 0), tx = E.reduce((a, e) => a + (e.tx || 0), 0);
+    rec.B = { ok: open ? arr < SIX_EXPECTED : arr === SIX_EXPECTED && tx === 0, arr, tx };
+    if (open) { rec.mode = "open"; rec.ok = rec.B.ok; if (!rec.ok) { R.fail = { kind: "open", phase: n }; } break; }
+    if (!rec.B.ok) { R.fail = { kind: "balance", phase: n }; break; }
+    // fast paths that need no solver
+    const nonArr = E.filter(e => !e.arr);
+    if (!nonArr.length && E.every(e => !e.tx)) rec.mode = "arrivals";
+    else {
+      const neg = E.filter(e => e.arr || e.tx < 0).reduce((a, e) => a + (e.tx || 0), 0);
+      rec.shortcut = { bound: neg, ok: neg >= 0 && nonArr.every(e => neg - Math.min(e.tx || 0, 0) > 0) };
+      if (rec.shortcut.ok) rec.mode = "shortcut";
+      else if (!solver) { rec.mode = "undecided"; R.undecided.push(n); }
+      else {
+        rec.mode = "solver";
+        const proj = [];
+        for (const u of E) for (const v of E) if (u !== v && reach(u.id, v.id)) proj.push([u.id, v.id]);
+        const q = { effects: E, proj };
+        const bound = minCut(q, null);
+        rec.bound = { weight: bound.weight, ideal: [...bound.side] };
+        rec.queries = nonArr.map(om => {
+          const mc = minCut(q, om.id);
+          return { omit: om.id, feasible: mc.feasible, weight: mc.weight, ideal: mc.feasible ? [...mc.side] : null };
+        });
+        const bad = rec.queries.find(r => r.feasible && r.weight <= 0);
+        if (bad) { rec.ok = false; R.fail = { kind: "premature", phase: n, query: bad }; break; }
+      }
+    }
+    rec.ok = true;
+    E.forEach(e => addEdge(e.id, "P" + n, "complete", n));
+    P.waits.filter(w => s.target[w.id] === n).forEach(w => addEdge("P" + n, w.id.slice(0, -1) + "d", "release", n));
+    rec.edgesAfter = added.length;
+  }
+  if (R.fail) return R;
+  // remaining stages: waits, lifecycle, races
+  const after = { waits: true, lifecycle: true, races: true, notes: [] };
+  for (const w of P.waits) {
+    const t = s.target[w.id];
+    if (t >= 1 && !ph[t - 1].every(f => reach(f, w.id))) { after.waits = false; after.notes.push(`${w.short}: phase ${t - 1} is not ordered before the issue`); }
+    if (t + 1 < completed && !ph[t + 1].some(f => reach(w.id, f))) { after.waits = false; after.notes.push(`${w.short}: no effect of phase ${t + 1} is ordered after the issue`); }
+  }
+  for (let n = 1; n < completed; n++) for (const id of ph[n]) {
+    const e = P.byId[id];
+    if (!e.arr) continue;
+    if (!P.waits.some(w => s.target[w.id] === n - 1 && reach(w.id.slice(0, -1) + "d", id))) { after.lifecycle = false; after.notes.push(`${e.short} is not ordered after a wait that observed phase ${n - 1}`); }
+  }
+  const writes = P.ev.filter(e => e.writes !== undefined), reads = P.ev.filter(e => e.reads !== undefined);
+  for (const w of writes) for (const o of [...writes, ...reads]) {
+    if (o === w || (o.writes ?? o.reads) !== w.writes) continue;
+    if (!reach(w.id, o.id) && !reach(o.id, w.id)) { after.races = false; after.notes.push(`${w.short} and ${o.short} touch slot ${w.writes} unordered`); }
+  }
+  R.after = after;
+  return R;
+}
+
+/* step 5 drawing: lanes are columns and time runs downward */
+const SX = { GUT: 62, LW: 140, NW: 128, NH: 24, RH: 32, TOP: 40 };
+const sxX = lane => SX.GUT + lane * SX.LW + (SX.LW - SX.NW) / 2;
+const sxY = row => SX.TOP + row * SX.RH;
+const sixCode = bug => {
+  const pair = bug
+    ? [['hl', '      mbarrier.arrive.shared.b64 _, [full];                 // arrives first'],
+       ['hl', '      mbarrier.expect_tx.shared.b64 [full], 1024;           // announces tile k afterwards']]
+    : [['', '      mbarrier.expect_tx.shared.b64 [full], 1024;           // announce tile k'],
+       ['', '      mbarrier.arrive.shared.b64 _, [full];']];
+  return [
+    ['c', 'mbarrier.init.shared.b64 [full], 2;                         // every phase expects 2 arrivals'],
+    ['', ''],
+    ['c', '// T0, producer: round k = 0 … 5'],
+    ['', '@k>0  mbarrier.try_wait.parity.shared.b64 p, [full], (k-1)%2;  // phase k-1 done: slot k%2 is free'],
+    ...pair,
+    ['', '      ' + TMA + ' [slot+(k%2)*1024], [tmap, {0, k}], [full];  // 1024 B'],
+    ['', ''],
+    ['c', '// T1, consumer: round k = 0 … 5'],
+    ['', '      mbarrier.arrive.shared.b64 _, [full];                 // finished reading tile k-1'],
+    ['', '      mbarrier.try_wait.parity.shared.b64 p, [full], k%2;'],
+    ['', '      ld.shared.f32 x, [slot+(k%2)*1024];                   // reads tile k'],
+  ];
+};
+
+function renderSixGraph(svg, P, o) {
+  svg.replaceChildren();
+  const W = SX.GUT + SIX_LANES.length * SX.LW + 6, H = SX.TOP + P.rows * SX.RH + 8;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  markers(svg);
+  SIX_LANES.forEach((name, i) => {
+    if (i % 2 === 0) svg.appendChild(el("rect", { x: SX.GUT + i * SX.LW, y: 0, width: SX.LW, height: H, class: "lane-band" }));
+    svg.appendChild(el("text", { x: SX.GUT + i * SX.LW + SX.LW / 2, y: 22, "text-anchor": "middle", class: "lane-label" }, name));
+  });
+  P.roundRow.forEach((r, k) => {
+    const y = sxY(r) - 4;
+    svg.appendChild(el("line", { x1: 0, x2: SX.GUT + 2 * SX.LW, y1: y, y2: y, class: "round-rule" }));
+    svg.appendChild(el("text", { x: 10, y: y + 17, class: "lane-label" }, `round ${k}`));
+  });
+  const pos = id => ({ lane: P.byId[id] ? P.byId[id].lane : 2, row: P.row[id] });
+  const edge = (f, t, cls) => {
+    const a = pos(f), b = pos(t);
+    const sx = sxX(a.lane) + SX.NW / 2, sy = sxY(a.row) + SX.NH, ex = sxX(b.lane) + SX.NW / 2, ey = sxY(b.row) - 2;
+    const d = sx === ex ? `M${sx},${sy} L${ex},${ey}` : `M${sx},${sy} C${sx},${(sy + ey) / 2} ${ex},${(sy + ey) / 2} ${ex},${ey}`;
+    svg.appendChild(el("path", { d, class: "edge " + cls, "marker-end": `url(#${svg.id}-m-${markerFor(cls)})` }));
+  };
+  for (const [f, t] of P.edges) edge(f, t, (P.byId[t].lane === 1 ? "e-async" : "e-po") + (o.faintStructure ? " e-faint" : ""));
+  for (const a of o.added || []) edge(a[0], a[1], a.cls);
+  const ids = [...P.ev.map(e => e.id), ...P.roundRow.map((_, k) => "P" + k)];
+  for (const id of ids) {
+    const e = P.byId[id], isP = !e;
+    if (isP && !o.showP(+id.slice(1))) continue;
+    const p = pos(id);
+    const cls = "node " + (isP ? "n-derived " : "") + (o.nodeClass(id) || "");
+    const g = el("g", { class: cls, "data-id": id, transform: `translate(${sxX(p.lane)},${sxY(p.row)})` });
+    if (cls.includes("n-enabled")) { g.setAttribute("tabindex", "0"); g.setAttribute("role", "button"); g.setAttribute("aria-label", "Run " + e.short); }
+    g.appendChild(el("rect", { width: SX.NW, height: SX.NH, rx: 6 }));
+    const t = el("text", { x: 8, y: 16, class: "lbl" });
+    if (isP) t.textContent = `phase ${id.slice(1)} complete`;
+    else {
+      t.appendChild(el("tspan", {}, e.name));
+      if (e.fx) t.appendChild(el("tspan", { class: "fx" + (e.tx ? " tx" : "") }, " " + e.fx));
+    }
+    g.appendChild(t);
+    const b = isP ? null : o.badge(id);
+    if (b) {
+      const bg = el("g", { class: "badge" + (b.w ? " w" : "") });
+      bg.appendChild(el("circle", { cx: SX.NW - 12, cy: SX.NH / 2, r: 8 }));
+      bg.appendChild(el("text", { x: SX.NW - 12, y: SX.NH / 2 + 3.5, "text-anchor": "middle" }, String(b.text)));
+      g.appendChild(bg);
+    }
+    g.appendChild(el("title", {}, isP ? `phase ${id.slice(1)} completes (derived, no thread)` : e.short));
+    svg.appendChild(g);
+  }
+}
+
+/* step 5 state */
+const SIXP = {};
+let sixCur = "ok", sixTab = "ref", sixPlay = null, sixTimer = null, sixSolver = true, sixSel = { phase: 0, q: null }, sixOwn = false;
+const sixP = () => (SIXP[sixCur] ||= sixBuild(sixCur === "bug"));
+const sixBadge = s => id => {
+  const e = sixP().byId[id];
+  if ((e.arr || e.tx) && s.phaseOf[id] !== undefined) return { text: s.phaseOf[id] };
+  if (e.waitIssue && s.target[id] !== undefined) return { text: s.target[id], w: true };
+  return null;
+};
+const shortNames = ids => ids.map(id => sixP().byId[id].short).join(", ");
+const sameSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
+function sixChecked() {
+  const P = sixP();
+  const own = sixOwn && sixPlay && sixFinished(P, sixPlay);
+  const s = own ? sixPlay : P.ref;
+  return { s, own, R: sixCheck(P, s, sixSolver) };
+}
+const mk = (tag, cls, html) => { const d = document.createElement(tag); if (cls) d.className = cls; if (html !== undefined) d.innerHTML = html; return d; };
+
+function renderSix() {
+  const P = sixP();
+  $("sx-ok").setAttribute("aria-pressed", String(sixCur === "ok"));
+  $("sx-bug").setAttribute("aria-pressed", String(sixCur === "bug"));
+  $("sx-tab-ref").setAttribute("aria-pressed", String(sixTab === "ref"));
+  $("sx-tab-check").setAttribute("aria-pressed", String(sixTab === "check"));
+  const pre = $("six-code"); pre.replaceChildren();
+  for (const [cls, line] of sixCode(P.bug)) { const span = document.createElement("span"); if (cls) span.className = cls; span.textContent = line; pre.append(span, "\n"); }
+  if (sixTab === "ref") renderSixRef(P); else renderSixCheck(P);
+  const n = P.enumd.outcomes.size;
+  $("six-why").innerHTML = P.bug
+    ? `Schedules of this kernel produce ${n} different classifications. In SentryWard's reference run, every phase gets its four effects. That classification passes separation and balance in all six phases, and the wait, lifecycle and race checks pass on the graph it builds. The one problem is inside phase 0: both arrivals can run before <code>expect_tx</code>, and then both counters are zero. Only the solver searches inside a phase, so only the solver rejects it. In each of the other ${n - 1} classifications some phase completes early, and separation then fails at the next phase. Turn the solver off in the check tab to compare.`
+    : `Every schedule of this kernel gives the same classification. Proving that still needs the solver. The shortcut that ignores order lets the TMA done run without the <code>expect_tx</code> that announced its bytes, which leaves −1024 bytes pending, so it cannot rule anything out. The order expect_tx → arrive → TMA issue → TMA done is what rules that out, and only the solver uses order. Without the solver, none of the six phases is proven.`;
+}
+
+function renderSixRef(P) {
+  const s = sixPlay || sixInit();
+  renderSixGraph($("g-six"), P, {
+    showP: k => s.cur > k,
+    badge: sixBadge(s),
+    nodeClass: id => {
+      if (!P.byId[id]) return "";
+      if (s.done.has(id)) return "n-done";
+      if (sixTimer === null && sixEnabled(P, s, id)) return "n-enabled";
+      const e = P.byId[id];
+      if (e.waitDone && P.preds[id].every(p => s.done.has(p))) return "n-blocked";
+      return "n-idle";
+    },
+  });
+  const panel = $("six-panel"); panel.replaceChildren();
+  panel.append(mk("p", "", "SentryWard first runs one schedule. It always picks the lowest-numbered event that may run, and T0's events are numbered before T1's. The phase each effect lands in and the phase each wait targets make up the <b>classification</b>. The rest of the check proves that classification for every schedule. Click highlighted events, or try other schedules."));
+  const gauge = mk("div", "gauge");
+  gauge.innerHTML = `<div class="g-item"><span class="g-label">Current phase</span><span class="g-val">${s.cur}</span></div>
+    <div class="g-item"><span class="g-label">Arrivals pending</span><span class="g-val">${s.arr}</span></div>
+    <div class="g-item"><span class="g-label">Bytes pending</span><span class="g-val tx">${s.tx}</span></div>`;
+  panel.append(gauge);
+  const ctl = mk("div", "controls");
+  const busy = sixTimer !== null;
+  for (const [label, pick, primary] of [["SentryWard's reference run", sixLowest, true], ["Consumer first", sixConsumerFirst], ["Random", sixRandom]]) {
+    const b = mk("button", "btn" + (primary ? " primary" : ""), label); b.type = "button"; b.disabled = busy;
+    b.addEventListener("click", () => sixAnimate(pick));
+    ctl.append(b);
+  }
+  const rs = mk("button", "btn", "Reset"); rs.type = "button";
+  rs.addEventListener("click", () => { sixStop(); sixPlay = null; renderSix(); });
+  ctl.append(rs);
+  panel.append(ctl);
+
+  const fin = sixFinished(P, s) && s.order.length;
+  const ph = sixPhases(P, s), refPh = sixPhases(P, P.ref);
+  const diff = [];
+  if (!s.order.length) panel.append(mk("div", "banner info", "Nothing has run yet. A highlighted event has all its predecessors done. A dashed wait done is waiting for its phase to complete."));
+  if (fin) {
+    for (let p = 0; p < Math.max(ph.length, refPh.length); p++) if (!sameSet(ph[p] || [], refPh[p] || [])) diff.push(p);
+    if (s.err) panel.append(mk("div", "banner bad", `The run stopped: ${s.err}.`));
+    else if (!diff.length) panel.append(mk("div", "banner ok", `All ${P.ev.length} events ran. This run gives the same classification as SentryWard's reference run.`));
+    else panel.append(mk("div", "banner bad", `All ${P.ev.length} events ran, but the classification differs from SentryWard's reference run in phase${diff.length > 1 ? "s" : ""} ${diff.join(", ")}: a phase completed with only the two arrivals, and its bytes spilled into the next phase.`));
+  }
+  if (s.stale.length) panel.append(mk("div", "banner bad", `T1 read tile${s.stale.length > 1 ? "s" : ""} ${s.stale.join(", ")} before the TMA landed.`));
+
+  const tbl = mk("table", "ctable");
+  tbl.innerHTML = "<thead><tr><th>Phase</th><th>Effects that landed in it</th><th>Waits that target it</th></tr></thead>";
+  const tb = document.createElement("tbody");
+  const rows = Math.max(ph.length, s.order.length ? s.cur + 1 : 1);
+  for (let p = 0; p < rows; p++) {
+    const tr = document.createElement("tr");
+    if (fin && diff.includes(p)) tr.className = "diff";
+    const status = p < s.cur ? "" : fin ? " (never completes)" : " (current)";
+    const waits = P.waits.filter(w => s.target[w.id] === p).map(w => w.short).join(", ");
+    tr.innerHTML = `<td>${p}${status}</td><td>${shortNames(ph[p] || []) || "–"}</td><td>${waits || "–"}</td>`;
+    tb.append(tr);
+  }
+  tbl.append(tb);
+  panel.append(tbl);
+  const n = P.enumd.outcomes.size;
+  panel.append(mk("p", "stats", n === 1
+    ? `The page explored every schedule of this kernel (<b>${P.enumd.states}</b> distinct states) and found <b>1</b> classification. Any run you make gives this table.`
+    : `The page explored every schedule of this kernel (<b>${P.enumd.states}</b> distinct states) and found <b>${n}</b> classifications. Each of the six phases may or may not complete early, so there are 2<sup>6</sup>. Rows in red differ from SentryWard's reference run.`));
+  if (fin && !s.err) {
+    const go = mk("button", "btn", "Check this classification"); go.type = "button";
+    go.addEventListener("click", () => { sixOwn = true; sixTab = "check"; sixSel = { phase: sixDefaultPhase(), q: null }; renderSix(); });
+    panel.append(go);
+  }
+}
+
+function sixStop() { if (sixTimer !== null) { clearTimeout(sixTimer); sixTimer = null; } }
+function sixAnimate(pick) {
+  sixStop();
+  const P = sixP();
+  sixPlay = sixInit();
+  if (reduced) { sixRun(P, pick, sixPlay); renderSix(); return; }
+  const tick = () => {
+    const next = sixNext(P, sixPlay);
+    if (!next.length) { sixTimer = null; renderSix(); return; }
+    sixStep(P, sixPlay, pick(next).id);
+    sixTimer = setTimeout(tick, 45);
+    renderSix();
+  };
+  sixTimer = 0; tick();
+}
+function sixDefaultPhase() {
+  const { R } = sixChecked();
+  return R.fail && R.fail.phase !== undefined ? R.fail.phase : 0;
+}
+
+function sixLift(P, R, ids) {
+  const pre = id => id[0] === "P" && !P.byId[id] ? R.added.filter(a => a[1] === id).map(a => a[0]) : [...P.preds[id], ...R.added.filter(a => a[1] === id).map(a => a[0])];
+  const set = new Set(), st = [...ids];
+  while (st.length) { const v = st.pop(); if (set.has(v)) continue; set.add(v); st.push(...pre(v)); }
+  return set;
+}
+function sixReplay(R) {
+  const P = sixP();
+  sixStop();
+  const s = sixInit();
+  if (R.fail.kind === "premature") {
+    const ideal = sixLift(P, R, R.fail.query.ideal);
+    sixRun(P, next => next.find(e => ideal.has(e.id)) || next[0], s);
+  } else {
+    s.extra = [R.fail.effect, R.fail.unordered[0]];
+    sixRun(P, sixLowest, s);
+  }
+  sixPlay = s; sixOwn = true; sixTab = "ref";
+  renderSix();
+}
+
+function renderSixCheck(P) {
+  const { s, own, R } = sixChecked();
+  const recs = R.phases;
+  if (sixSel.phase >= recs.length) sixSel = { phase: Math.max(0, recs.length - 1), q: null };
+  const rec = recs[sixSel.phase];
+  const n = rec ? rec.n : 0;
+  const inPhase = new Set(rec ? rec.effects : []), prev = new Set(n > 0 && recs[n - 1] ? recs[n - 1].effects : []);
+  const q = rec && sixSel.q !== null ? (sixSel.q === "bound" ? { ideal: rec.bound.ideal, omit: null } : rec.queries[sixSel.q]) : null;
+  const boundary = rec ? (rec.ok ? rec.edgesAfter : rec.edgesAfterPrev ?? rec.edgesBefore) : 0;
+  const added = R.added.slice(0, boundary).map(a => Object.assign([...a], { cls: "e-sync" + (a[3] === n ? "" : " e-faint") }));
+  renderSixGraph($("g-six"), P, {
+    faintStructure: true,
+    added,
+    showP: k => k < n || (k === n && rec && rec.ok && rec.edgesAfter !== undefined),
+    badge: sixBadge(s),
+    nodeClass: id => {
+      if (!P.byId[id] || !rec) return "";
+      if (rec.S && !rec.S.ok) return id === rec.S.effect || rec.S.unordered.includes(id) ? "n-omit" : inPhase.has(id) || prev.has(id) ? "n-out" : "n-dim";
+      if (q) return id === q.omit ? "n-omit" : inPhase.has(id) ? (q.ideal && q.ideal.includes(id) ? "n-in" : "n-out") : "n-dim";
+      return inPhase.has(id) ? "n-in" : prev.has(id) ? "n-out" : "n-dim";
+    },
+  });
+
+  const panel = $("six-panel"); panel.replaceChildren();
+  const src = mk("p", "stats");
+  src.innerHTML = own ? "Checking <b>your run</b> from the reference tab. " : "Checking <b>SentryWard's reference run</b>. ";
+  if (own) {
+    const back = mk("button", "btn", "Check SentryWard's reference run instead"); back.type = "button";
+    back.addEventListener("click", () => { sixOwn = false; sixSel = { phase: sixDefaultPhase(), q: null }; renderSix(); });
+    panel.append(src, back);
+  } else panel.append(src);
+  panel.append(mk("p", "", "Phases are checked in order. Each one must be <b>separated</b> from the previous phase (S) and <b>balanced</b> (B). Then the check rules out early completion: first with a shortcut that ignores order, and if that cannot decide, with the solver. Each proven phase adds edges that later phases rely on."));
+  const sw = mk("div", "switch"); sw.setAttribute("role", "group"); sw.setAttribute("aria-label", "Solver");
+  for (const [label, on] of [["Solver on", true], ["Solver off", false]]) {
+    const b = mk("button", "", label); b.type = "button"; b.setAttribute("aria-pressed", String(sixSolver === on));
+    b.addEventListener("click", () => { sixSolver = on; sixSel = { phase: sixDefaultPhase(), q: null }; renderSix(); });
+    sw.append(b);
+  }
+  panel.append(sw);
+
+  // verdict
+  const v = R.fail, a = R.after;
+  const afterOk = a && a.waits && a.lifecycle && a.races;
+  let vcls, vtext;
+  if (v && v.kind === "premature") { vcls = "bad"; vtext = `<b>not_wellsynced</b> (premature_phase_completion, phase ${v.phase}). Separation and balance passed; the solver found the early completion.`; }
+  else if (v && v.kind === "separation") { vcls = "bad"; vtext = `<b>not_wellsynced</b> (previous_phase_separation, phase ${v.phase}). The classification already fails separation, so the solver is never reached.`; }
+  else if (v) { vcls = "bad"; vtext = `<b>not_wellsynced</b>: ${v.text || v.kind}.`; }
+  else if (R.undecided.length) { vcls = "info"; vtext = `<b>Not proven.</b> The shortcut cannot decide phase${R.undecided.length > 1 ? "s" : ""} ${R.undecided.join(", ")}. If those phases were simply trusted, the waits, lifecycle and race checks would ${afterOk ? "all pass" : "fail"}, and the kernel would be reported <b>${afterOk ? "race_free" : "not_wellsynced"}</b>.${P.bug && afterOk ? " That would be wrong: this kernel is buggy." : ""}`; }
+  else { vcls = afterOk ? "ok" : "bad"; vtext = afterOk ? "<b>race_free</b>. All six phases are proven. The wait, lifecycle and race checks then pass on the finished graph." : `Phases proven, but: ${a.notes.join("; ")}.`; }
+  panel.append(mk("div", "banner " + vcls, vtext));
+
+  // phase list
+  const list = mk("div", "plist"); list.setAttribute("role", "group"); list.setAttribute("aria-label", "Phases");
+  const total = Math.max(SIX_ROUNDS, sixPhases(P, s).length);
+  for (let p = 0; p < total; p++) {
+    const r = recs[p];
+    const b = mk("button", "prow"); b.type = "button";
+    b.setAttribute("aria-pressed", String(!!r && p === sixSel.phase));
+    let pill;
+    if (!r) { pill = ["", "not checked"]; b.disabled = true; }
+    else if (r.S && !r.S.ok) pill = ["bad", "fails S"];
+    else if (r.mode === "open") pill = ["ok", "open: never completes"];
+    else if (!r.ok && R.fail && R.fail.phase === p) pill = ["bad", "fails: early completion"];
+    else if (r.mode === "solver") pill = ["ok", "proven by the solver"];
+    else if (r.mode === "shortcut") pill = ["ok", "proven by the shortcut"];
+    else if (r.mode === "arrivals") pill = ["ok", "proven: arrivals only"];
+    else if (r.mode === "undecided") pill = ["warn", "S, B pass · undecided"];
+    b.innerHTML = `<span>Phase ${p}${r && r.open ? " (open)" : ""}</span><span class="pill ${pill[0]}">${pill[1]}</span>`;
+    if (r) b.addEventListener("click", () => { sixSel = { phase: p, q: null }; renderSix(); });
+    list.append(b);
+  }
+  panel.append(list);
+  if (rec) panel.append(sixDetail(P, s, R, rec));
+  if (a) panel.append(mk("p", "stats", `After the phases: waits ${a.waits ? "pass" : "fail"}, lifecycle ${a.lifecycle ? "passes" : "fails"}, races ${a.races ? "none found" : "found"}.`));
+}
+
+function sixDetail(P, s, R, rec) {
+  const n = rec.n, d = mk("div", "detail");
+  const line = (k, text, cls) => { const p = mk("p", cls || "", `<span class="k">${k}</span> ${text}`); d.append(p); return p; };
+  line(`Phase ${n} effects:`, shortNames(rec.effects) + ".");
+  if (rec.S.init) line("S:", "ordered after <code>mbarrier.init</code> (by the <code>__syncthreads</code> that follows it, not drawn).");
+  else if (rec.S.ok) line("S:", `every effect is ordered after every effect of phase ${n - 1}. Added edges from <i>phase ${n - 1} complete</i> to each of them.`);
+  else {
+    line("S fails:", `${P.byId[rec.S.effect].short} is not ordered after ${shortNames(rec.S.unordered)}. A schedule can run it first, and then it lands in phase ${n - 1}, not ${n}.`);
+    const b = mk("button", "btn", "Replay that schedule in the reference tab"); b.type = "button";
+    b.addEventListener("click", () => sixReplay(R));
+    d.append(b);
+    return d;
+  }
+  if (rec.mode === "open") { line("Open phase:", `${rec.B.arr} of ${SIX_EXPECTED} arrivals, so it never completes in any schedule.`); return d; }
+  line("B:", `${rec.B.arr} of ${SIX_EXPECTED} arrivals; bytes net to ${rec.B.tx}.`);
+  if (rec.mode === "arrivals") line("Early completion:", "every effect is an arrival with no bytes, so balance alone shows the phase completes only with its last arrival. No solver call.");
+  if (rec.shortcut) {
+    line("Shortcut:", `assume any subset of the effects can run, ignoring order. The worst case has every arrival and the TMA done but no <code>expect_tx</code>: ${rec.shortcut.bound} bytes pending. ${rec.shortcut.ok ? "That still rules out early completion." : "That is below zero, so the shortcut cannot rule out an early completion."}`);
+  }
+  if (rec.mode === "undecided") line("Solver off:", "this phase stays undecided.", "stats");
+  if (rec.queries) {
+    line("Solver:", "every arrival is forced in. Each query finds the downward-closed set (ideal) with the fewest bytes pending. Select a query to see its ideal.");
+    const opts = [{ key: "bound", text: `Fewest bytes with every arrival in: ${fmtB(rec.bound.weight)} B. Not negative, so the bound holds.`, bad: false }];
+    rec.queries.forEach((qq, i) => {
+      const om = P.byId[qq.omit].short;
+      const text = !qq.feasible ? `Leave out ${om}: no ideal. An arrival comes after it, and every arrival must be in.`
+        : qq.weight > 0 ? `Leave out ${om}: at best {${shortNames(qq.ideal)}}, ${fmtB(qq.weight)} B pending. Cannot complete without it.`
+        : `Leave out ${om}: {${shortNames(qq.ideal)}} has 0 arrivals and ${fmtB(qq.weight)} B pending. The phase can complete without it.`;
+      opts.push({ key: i, text, bad: qq.feasible && qq.weight <= 0 });
+    });
+    for (const o of opts) {
+      const b = mk("button", "qrow" + (o.bad ? " bad" : ""), o.text); b.type = "button";
+      b.setAttribute("aria-pressed", String(sixSel.q === o.key));
+      b.addEventListener("click", () => { sixSel = { phase: n, q: sixSel.q === o.key ? null : o.key }; renderSix(); });
+      d.append(b);
+    }
+  }
+  if (R.fail && R.fail.kind === "premature" && R.fail.phase === n) {
+    line("Witness:", `run ${shortNames(R.fail.query.ideal)}. Both counters reach zero, so phase ${n} completes, and the rest of its effects land in phase ${n + 1}. That gives a different classification.`);
+    const b = mk("button", "btn", "Replay the witness in the reference tab"); b.type = "button";
+    b.addEventListener("click", () => sixReplay(R));
+    d.append(b);
+  } else if (rec.ok) {
+    const waits = P.waits.filter(w => s.target[w.id] === n).map(w => w.short);
+    line("Then:", `added edges from each effect to <i>phase ${n} complete</i>, and from it to the done of ${waits.join(" and ") || "no wait"}.`);
+  }
+  return d;
+}
+
+$("sx-ok").addEventListener("click", () => { sixStop(); sixCur = "ok"; sixPlay = null; sixOwn = false; sixSel = { phase: 0, q: null }; renderSix(); });
+$("sx-bug").addEventListener("click", () => { sixStop(); sixCur = "bug"; sixPlay = null; sixOwn = false; sixSel = { phase: 0, q: null }; renderSix(); });
+$("sx-tab-ref").addEventListener("click", () => { sixTab = "ref"; renderSix(); });
+$("sx-tab-check").addEventListener("click", () => { sixStop(); sixTab = "check"; sixSel = { phase: sixDefaultPhase(), q: null }; renderSix(); });
+const sixSvg = $("g-six");
+const sixTry = (target, fromKeyboard) => {
+  const g = target.closest(".node.n-enabled");
+  if (!g || sixTab !== "ref" || sixTimer !== null) return;
+  sixPlay ||= sixInit();
+  sixStep(sixP(), sixPlay, g.dataset.id); renderSix();
+  if (fromKeyboard) sixSvg.querySelector(".node.n-enabled")?.focus();
+};
+sixSvg.addEventListener("click", e => sixTry(e.target, false));
+sixSvg.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sixTry(e.target, true); } });
+
 Object.values(SC).forEach(prep);
 renderAll();
+renderSix();
 })();
 </script>

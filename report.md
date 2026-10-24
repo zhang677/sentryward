@@ -132,8 +132,9 @@ is needed. The stages themselves are listed in
    and no arrival underflow, transaction overflow or similar violation occurs.
 3. **Barrier counters.** A barrier is always in some current phase. Each effect
    changes the pending arrivals and pending TMA bytes by its weights. The phase
-   completes at the moment both reach zero, and the next phase starts with the
-   expected arrival count and zero bytes.
+   completes at the first moment both reach zero, even if effects assigned to
+   it have not yet run. The next phase then starts with the expected arrival
+   count and zero bytes, and any later effects count toward it.
 4. **Wait targets.** A wait's target phase is fixed when it is issued
    (`issuedTarget` in `cpp/src/semantics/simulator.cpp`). A parity-p wait
    issued while the barrier is in phase k targets k if p = k mod 2, and blocks
@@ -173,7 +174,8 @@ impossible states, so a failed proof may be a false alarm, but a passed proof
 is never wrong.
 
 **Facts proved for each phase.** Let Eₙ be the effects C assigns to phase n of
-a barrier.
+a barrier. Balance alone does not suffice: by axiom 3, a phase completes the
+first time both counters reach zero, which may happen before all of Eₙ has run.
 
 | Fact | Stage | Statement | Why it is needed |
 |---|---|---|---|
@@ -188,10 +190,42 @@ all of Eₙ has run, and by B they are once it has. Phase n therefore completes
 exactly when its last effect runs, and every effect lands in its assigned
 phase (item 1 of the definition).
 
+**Why balance is not enough.** In this example, barrier `F` has count 1. P0
+loads buffer A and P1 loads buffer B; C reads both once `F` phase 0 completes:
+
+```
+P0:  e1 = expect_tx F(16)  →  a = arrive F  →  TMA load A … c1 = complete_tx F(16)
+P1:  e2 = expect_tx F(16)  →  TMA load B … c2 = complete_tx F(16)
+C:   w = wait F(0)  →  read A, B
+```
+
+C assigns all five effects to phase 0, and B holds: one arrival, and
++32 − 32 bytes. Nothing orders P1 with P0, so this schedule is legal:
+
+| Event | Pending arrivals | Pending bytes | Phase |
+|---|---|---|---|
+| `mbarrier.init F, 1` | 1 | 0 | 0 |
+| `e1` | 1 | 16 | 0 |
+| `a` | 0 | 16 | 0 |
+| `c1` | 0 | 0 | 0 completes |
+| `w` returns; C reads B | | | B not yet loaded |
+| `e2` | 1 | 16 | 1 |
+| `c2` | 1 | 0 | 1 |
+
+The barrier completes phase 0 before P1 has announced its bytes. C then reads B
+before it is written, and `e2` and `c2` land in phase 1 instead of phase 0. A
+schedule that runs `e2` before `c1` completes phase 0 only at `c2`, so the two
+schedules produce different classifications and the kernel is not
+well-synchronized. B sees the same totals in both schedules and cannot tell
+them apart. N rejects the ideal `{e1, a, c1}` with `kPrematurePhaseCompletion`.
+To fix the kernel, announce all the bytes before the arrival that can complete
+the phase: P0 does `expect_tx F(32)`, or `F` has count 2 and each producer uses
+`arrive.expect_tx F(16)`.
+
 The solver queries of 2b establish N. Arrivals sum to exactly the expected
 count, so an ideal missing one still has arrivals pending; only ideals with
 every arrival need to be searched. For each non-arrival effect X, a minimum
-pending byte count above zero with X forced out shows that the phase cannot
+pending byte count above zero with X excluded (`force_out`) shows that the phase cannot
 complete without X. The nonnegativity query is what makes a minimum of zero or
 less mean exactly zero, a real early completion. When it fails, the result is
 `unsupported` rather than a rejection, unless `reject_negative_tx` is set
@@ -308,10 +342,10 @@ by earlier ones, so the order of the stages matters.
      enumeration:
      - The arrivals must sum to the expected count and the TMA bytes must net
        to zero. No solver call is needed for this.
-     - With every arrival forced in, the minimum pending byte count must be
+     - With every arrival required (`force_in`), the minimum pending byte count must be
        ≥ 0. Otherwise the result is `kNegativeTransactionPrefix`.
      - For each non-arrival effect E (an `expect_tx` or a byte completion):
-       with every arrival forced in and E forced out, the minimum pending byte
+       with every arrival required and E excluded, the minimum pending byte
        count must stay > 0. Otherwise the phase can complete without E
        (`kPrematurePhaseCompletion`), and the minimizing ideal, extended to
        all its HB predecessors and listed in topological order, is the
