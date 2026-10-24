@@ -51,7 +51,10 @@ Implemented in `WellSyncChecker::RunExecutionOrder`
 - **Effect.** An event that changes a barrier's counters. The graph does not
   distinguish effects; they are a side table (`PhaseDatabase`) recording, for
   each such event, its weights (`PhaseEffectWeights`) and the phase it fell
-  into in the reference run (`GetPhaseEffectWeights` in
+  into in the reference run. An effect's *weights* are the amounts by which
+  it changes the barrier's two pending counters, pending arrivals and pending
+  TMA bytes. Adding up the weights of a phase's effects gives the change in
+  each counter over that phase (see **Phase** below). The weights of each event kind (`GetPhaseEffectWeights` in
   `cpp/src/analysis/phase_database.cpp`):
 
   | Event | Pending arrivals | Pending TMA bytes |
