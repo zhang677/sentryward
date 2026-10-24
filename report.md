@@ -39,36 +39,226 @@ assumptions you opt into, described in [docs/assumptions.md](docs/assumptions.md
 Implemented in `WellSyncChecker::RunExecutionOrder`
 (`cpp/src/checker/wellsync_checker.cpp`).
 
-1. **Reference simulation.** It runs one schedule (`ReferenceSimulator`) and
-   records each barrier phase: its arrivals and the TMA transaction bytes that
-   complete it. If even this schedule deadlocks or misbehaves, the result is
-   `not_wellsynced` with that trace as the witness.
-2. **HB graph.** It builds a graph containing only the orderings that hold in
-   *every* schedule: program order plus the ordering that synchronization
-   guarantees.
-3. **Phase boundaries.** For each phase, in trace order
-   (`cpp/src/analysis/phase_boundary.cpp`), it checks that no schedule can
-   complete the phase early, with a different set of effects.
-   - Each subset of events that a valid schedule could have executed is a
-     downward-closed set (an "ideal") of the HB graph.
-   - For each effect left out, it computes the minimum pending
-     arrival/transaction count over all ideals that exclude it. This is done
-     with `MinimumWeightIdealSolver`, a max-flow/min-cut solver
-     (`cpp/include/sentryward/algorithm/solver/dinic.h`).
-   - If that minimum can reach zero, the phase could flip early. The check
-     fails, and the minimizing ideal is turned into a counterexample schedule.
-   - If it passes, the phase-completion edges are added to the HB graph
-     (`AddCompletedPhase`). That makes the next phase's check stronger.
-4. **Waits** (`cpp/src/analysis/wait_checker.cpp`). Each `try_wait`/parity wait
-   must observe the same phase in every schedule. "Lower freshness" means the
-   target phase's completion is HB-before the wait. "Upper freshness" means the
-   next phase can't already have completed.
+### Terms
+
+- **Event.** One node of the specialized program: an instruction executed by
+  one thread, or one step of an asynchronous operation. A TMA copy, for example,
+  has a separate *issue* event (in the issuing thread's program order) and a
+  *completion* event that happens later.
+- **HB graph.** A directed graph over events. An edge `u → v` means u happens
+  before v in *every* legal schedule. The graph only ever contains orderings
+  that have been proven; it starts small and grows as the check proceeds.
+- **Effect.** An event that changes a barrier's counters. The graph does not
+  distinguish effects; they are a side table (`PhaseDatabase`) recording, for
+  each such event, its weights (`PhaseEffectWeights`) and the phase it fell
+  into in the reference run (`GetPhaseEffectWeights` in
+  `cpp/src/analysis/phase_database.cpp`):
+
+  | Event | Pending arrivals | Pending TMA bytes |
+  |---|---|---|
+  | `mbarrier.arrive` (optional count operand, default 1) | −count | 0 |
+  | `mbarrier.arrive.expect_tx` | −1 | +bytes |
+  | `mbarrier.expect_tx` | 0 | +bytes |
+  | `mbarrier.complete_tx`, completion of a TMA copy | 0 | −bytes |
+  | `cp.async.mbarrier.arrive` without `.noinc` (the up-front increment) | +1 | 0 |
+  | named barrier arrive (`bar.arrive`, `bar.sync`) | −1 | 0 |
+
+  Arrivals are counted per thread: a warp-wide `mbarrier.arrive` with no
+  election is 32 arrivals.
+- **Phase.** One round of a barrier: it starts with the expected arrival count
+  pending and completes when both the pending arrivals and the pending TMA bytes
+  reach zero. *Phase n's effects* are the effects the reference run assigned to
+  it (`PhaseInfo::effects`). A phase is a set of nodes, not a subgraph: its
+  effects usually sit on different threads with no edges between them.
+- **Phase-completion node** (`doneₙ`). A node the checker adds to the HB graph
+  once phase n is certified (`AddPhaseCompletion`). It corresponds to no
+  instruction and stands for the moment phase n completes.
+- **Wait issue / wait done.** A `try_wait` loop is two events: the *issue*
+  (the thread starts waiting) and the *done* (the wait returns having observed
+  the phase). Only the done event is ordered after the phase completes.
+- **Downward-closed set (ideal).** A set S of events such that for every edge
+  `u → v`, if v is in S then u is in S. Equivalently, no edge enters S from
+  outside. For the graph `A → B → C` plus an unrelated `D`:
+
+  | Set | Ideal? |
+  |---|---|
+  | `{}`, `{A}`, `{A,B}`, `{A,D}`, `{A,B,C,D}` | yes |
+  | `{B}` | no: B is in, its predecessor A is not |
+  | `{A,C}` | no: C is in, its predecessor B is not |
+
+  The events that have run at any moment of any schedule form an ideal, since
+  nothing runs before what it depends on. Conversely, every ideal of the HB
+  graph is treated as reachable. Because the graph only holds proven orderings,
+  this over-approximates the real schedules, which keeps the check
+  conservative.
+
+### Definition
+
+A kernel is **well-synchronized** if every legal schedule agrees with the
+reference run on every synchronization outcome:
+
+1. **Phase membership.** Each phase that completes is completed by exactly the
+   effects the reference run assigned to it: it never completes without one of
+   them, and no effect lands in a different phase.
+2. **Open phases.** A phase still incomplete at the end of the reference run
+   never completes in any schedule.
+3. **Waits.** Each `try_wait`/parity wait observes the same phase as in the
+   reference run.
+4. **Lifecycle.** A barrier is never re-armed for phase n+1 before its phase n
+   was observed.
+
+When these hold, every ordering derived from synchronization (such as "the
+producer's arrive happens before the consumer's wait returns") holds in every
+schedule. Since the reference run terminated, every schedule terminates, so the
+kernel cannot deadlock.
+
+### How it is checked
+
+The check is an induction over phases in the order the reference run completed
+them. Each step proves one fact for all schedules using only the current HB
+graph, then adds the edges that fact implies. Later steps depend on edges added
+by earlier ones, so the order of the stages matters.
+
+0. **Reference run.** It runs one schedule (`ReferenceSimulator`) and records
+   which phase each effect fell into and which phase each wait observed. This
+   is the claim the remaining stages prove for all schedules. If even this
+   schedule deadlocks or misbehaves, the result is `not_wellsynced` with that
+   trace as the witness.
+1. **Initial HB graph.** Program order, issue-before-completion inside each
+   asynchronous operation, and other orderings that don't depend on any barrier
+   outcome. No barrier edges yet.
+2. **Each completed phase n, in trace order:**
+   - **a. Phase start** (`CheckPhaseStart`). Every effect of phase n must
+     already be HB-after every effect of phase n−1 (for phase 0: after the
+     `mbarrier.init`). Then no effect can land in an earlier phase. Edges from
+     phase n−1's completion node to phase n's effects are added.
+   - **b. Phase boundary** (`CheckCompletedPhase`,
+     `cpp/src/analysis/phase_boundary.cpp`). The phase must not be able to
+     complete without one of its own effects. The HB graph is first projected
+     onto the phase's effects, with an edge wherever one effect is HB-before
+     another. Each query below is one call to `MinimumWeightIdealSolver`, a
+     max-flow/min-cut solver (`cpp/include/sentryward/algorithm/solver/dinic.h`)
+     that returns the single ideal with the lowest pending count, never an
+     enumeration:
+     - The arrivals must sum to the expected count and the TMA bytes must net
+       to zero. No solver call is needed for this.
+     - With every arrival forced in, the minimum pending byte count must be
+       ≥ 0. Otherwise the result is `kNegativeTransactionPrefix`.
+     - For each non-arrival effect E (an `expect_tx` or a byte completion):
+       with every arrival forced in and E forced out, the minimum pending byte
+       count must stay > 0. Otherwise the phase can complete without E
+       (`kPrematurePhaseCompletion`), and the minimizing ideal, extended to
+       all its HB predecessors and listed in topological order, is the
+       counterexample schedule.
+
+     Arrivals need no query of their own: they sum to exactly the expected
+     count, so an ideal missing one still has arrivals pending. A phase with
+     only arrivals needs no solver call at all. Phases with `cp.async`
+     increments use a variant (`CheckIncrementPhase`) with 3 queries plus one
+     per effect.
+   - **c. Completion edges** (`AddCompletedPhase`). The phase-completion node
+     `doneₙ` is added, with an edge from each of the phase's effects to it and
+     from it to the done event of each wait that observed the phase. Stages a
+     and b rely on these edges for later phases (see
+     [How the HB graph grows](#how-the-hb-graph-grows)).
+3. **Open phases** (`CheckOpenPhase`). For each phase still incomplete at the
+   end of the reference run, one query shows the pending count stays > 0 in
+   every ideal.
+4. **Waits** (`cpp/src/analysis/wait_checker.cpp`). Each wait must observe the
+   same phase in every schedule. "Lower freshness" means the target phase's
+   completion is HB-before the wait. "Upper freshness" means the next phase
+   can't already have completed.
 5. **Lifecycle** (`cpp/src/analysis/lifecycle_checker.cpp`). Every arrival on
-   phase *n+1* must be HB-after a successful wait on phase *n*, so a barrier is
-   never re-armed before its previous phase was observed.
-6. **Freeze.** The final HB graph must be acyclic. The graph, plus all the
-   phase, wait and lifecycle certificates, becomes a `PassCertificate`
-   (`cpp/include/sentryward/algorithm/checker/certificate.h`).
+   phase n+1 must be HB-after a successful wait on phase n.
+6. **Freeze.** No derived edge may contradict the reference trace, and the
+   final HB graph must be acyclic. The graph, plus all the phase, wait and
+   lifecycle certificates, becomes a `PassCertificate`
+   (`cpp/include/sentryward/algorithm/checker/certificate.h`). The race check
+   in section 3 relies on this graph.
+
+### How the HB graph grows
+
+The initial graph holds only orderings that don't depend on any barrier
+outcome. Its edge kinds are program order, issue-before-completion inside an
+asynchronous operation, state def-use and a few other structural kinds
+(`toHappensBeforeReason` in `cpp/src/analysis/happens_before_graph.cpp`). Most
+of them stay inside one thread or one operation.
+
+After that, exactly three edge kinds are added, each only once a certificate
+justifies it:
+
+| Edge | Added by | Justified because |
+|---|---|---|
+| each effect of phase n → `doneₙ` (`kCertifiedPhaseCompletion`) | stage 2c | stages 2a and 2b proved these are exactly the effects that complete phase n, in every schedule |
+| `doneₙ` → each wait done that observed phase n (`kWaitRelease`) | stage 2c | the wait can only return once the phase has completed |
+| `doneₙ₋₁` → each effect of phase n (`kCertifiedPreviousPhase`) | stage 2a; the wait check adds the same kind of edge to wait issues | every effect of phase n−1 was already shown to reach that node |
+
+Only the `kWaitRelease` edges create new orderings between real events. The
+other two kinds connect a phase-completion node: `doneₙ₋₁ → X` is added only
+when every effect of phase n−1 already reaches X, so it never lets one real
+event reach another that it couldn't reach before. These edges make `doneₙ` an
+exact summary of "phase n has completed", which later queries use.
+
+For example, a producer writes X and then arrives; a consumer waits and then
+reads X. Before phase 0 is certified, the write and the read are unordered:
+
+```
+P:  write X  →  arrive*
+C:  wait issue  →  wait done  →  read X
+```
+
+After phase 0 is certified, they are ordered through `done₀`:
+
+```
+P:  write X  →  arrive*  ─┐
+                          ↓
+                        done₀
+                          ↓
+C:  wait issue  →  wait done  →  read X
+```
+
+The path `write X → arrive → done₀ → wait done → read X` is what lets the race
+check in section 3 treat the write and the read as ordered.
+
+Each edge has to wait for its proof. `arrive → done₀` is valid only if phase 0
+can never complete without that arrive. If it could complete early, as in the
+premature-completion example below, the consumer could pass the wait before the
+producer's write, and the edge would claim an ordering that doesn't always
+hold. So membership is proven first (2a, 2b) and the edges are added after
+(2c); those edges then make the next phase's proofs possible.
+
+### Example: a passing phase
+
+A barrier is initialized with count 2. Producers P1 and P2 each arrive once,
+and consumer C waits on phase 0.
+
+- **a.** Both arrives are HB-after the init.
+- **b.** The arrivals sum to 2 and there are no TMA bytes, so no solver call is
+  needed.
+- **c.** Edges `P1 → done₀`, `P2 → done₀` and `done₀ → C's wait done` are added.
+- **Waits.** C's wait done is HB-after `done₀`, and phase 1 has no effects, so C
+  observes phase 0 in every schedule.
+
+### Example: a premature completion
+
+One producer thread loads two tiles but arms the second tile late (`*` marks
+the effects of phase 0):
+
+```
+arrive.expect_tx(64)*  →  TMA A issue  →  A completes −64*
+        ↓
+   expect_tx(+64)*     →  TMA B issue  →  B completes −64*
+```
+
+Suppose the reference run finished both loads before phase 0 completed, so all
+four effects are in phase 0 and the balance holds (+128 − 128 bytes, 1 of 1
+arrivals). For E = B's completion, the solver finds the ideal
+`{arrive.expect_tx, A completes}`. It contains every arrival, it is
+downward-closed among the four effects, and its pending byte count is
+64 − 64 = 0. Phase 0 can therefore complete before tile B is armed, and a
+consumer waiting on phase 0 may read tile B early. Extended to the full graph,
+the ideal also includes `TMA A issue`; listed in topological order, it is the
+counterexample schedule.
 
 ## 3. Race and memory check
 
