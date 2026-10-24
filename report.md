@@ -122,11 +122,32 @@ them. Each step proves one fact for all schedules using only the current HB
 graph, then adds the edges that fact implies. Later steps depend on edges added
 by earlier ones, so the order of the stages matters.
 
-0. **Reference run.** It runs one schedule (`ReferenceSimulator`) and records
-   which phase each effect fell into and which phase each wait observed. This
-   is the claim the remaining stages prove for all schedules. If even this
-   schedule deadlocks or misbehaves, the result is `not_wellsynced` with that
-   trace as the witness.
+0. **Reference run.** It runs one schedule (`ReferenceSimulator`,
+   `cpp/src/semantics/simulator.cpp`) and records which phase each effect fell
+   into and which phase each wait observed. This is the claim the remaining
+   stages prove for all schedules. The schedule is built one event at a time,
+   and an event may run only when:
+   - its predecessors in the event graph (program order, issue before
+     completion, …) have run;
+   - for a wait done, the phase it targets has completed in the simulated
+     barrier state;
+   - running it breaks no barrier rule. Arrival underflow, transaction
+     overflow, a wait on a stale phase and similar violations
+     (`SimulationErrorCode` in
+     `cpp/include/sentryward/algorithm/semantics/simulator.h`) stop the run.
+
+   Among the events that may run, it picks the one with the lowest ID. Before
+   each such pick it first runs every collective completion that may run (the
+   derived event the lowering adds once all of a collective's participants
+   have arrived), so a collective completes as soon as its last participant
+   arrives. The choice of order is arbitrary: if the kernel is well-synchronized, every legal order
+   gives the same phases and waits. If even this schedule deadlocks or breaks
+   a barrier rule, the result is `not_wellsynced` with that trace as the
+   witness.
+
+   These rules are SentryWard's model of PTX barrier semantics. They are
+   assumed, not checked against hardware; features outside the model are
+   reported `unsupported` (section 1).
 1. **Initial HB graph.** Program order, issue-before-completion inside each
    asynchronous operation, and other orderings that don't depend on any barrier
    outcome. No barrier edges yet.
