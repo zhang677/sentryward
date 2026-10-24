@@ -222,6 +222,30 @@ To fix the kernel, announce all the bytes before the arrival that can complete
 the phase: P0 does `expect_tx F(32)`, or `F` has count 2 and each producer uses
 `arrive.expect_tx F(16)`.
 
+**Why every early completion is a bug.** The example is not a special case.
+Suppose some schedule reaches a state where phase n is current, both counters
+are zero and some effect of Eₙ has not run. By axiom 3 the phase completes
+there. By axiom 1 the missing effects still run later, so they land in phase
+n+1 or later, and the schedule disagrees with C. The missing effects also have
+a fixed shape. Let I be the effects of Eₙ that have run and M = Eₙ ∖ I the
+rest:
+
+- M has no arrival: the arrivals of Eₙ sum to exactly the expected count, so
+  without one of them arrivals are still pending.
+- The bytes of M net to zero: those of Eₙ do by B, and those of I do because
+  the counter is zero.
+- M therefore holds at least one `expect_tx` and one `complete_tx`, since it is
+  nonempty and holds only byte effects of positive size.
+
+So at every early completion some TMA load has not landed, yet every wait on
+phase n is released. That load is one the barrier was meant to guard. Its
+effects also spill into phase n+1 and shift that phase's counts. Whether a
+wrong value is read depends on whether some consumer reads that buffer without
+other synchronization; the check does not ask, since the disagreement with C
+already violates the definition. This holds for a state some schedule
+actually reaches. N is checked on ideals, which may include unreachable
+states, so a rejection by N can still be a false alarm.
+
 The solver queries of 2b establish N. Arrivals sum to exactly the expected
 count, so an ideal missing one still has arrivals pending; only ideals with
 every arrival need to be searched. For each non-arrival effect X, a minimum

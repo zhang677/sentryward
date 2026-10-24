@@ -240,7 +240,7 @@ footer h3 { margin-bottom: 10px; }
   <header>
     <div class="eyebrow">SentryWard · well-synchronization check</div>
     <h1>Proving a barrier phase without listing schedules</h1>
-    <p class="lede">SentryWard runs a kernel once, then proves that no other interleaving could complete an mbarrier phase differently. This page uses a toy kernel to show how it does that: one producer thread loads two tiles with TMA, and one consumer thread waits on the barrier and then reads a tile.</p>
+    <p class="lede">SentryWard runs a kernel once, then proves that no other interleaving could complete an mbarrier phase differently. This page uses a toy kernel to show how it does that: one producer thread loads two tiles with TMA. One consumer thread arrives on the barrier to say it is ready, waits for the phase to complete, and then reads a tile.</p>
     <div class="switch" role="group" aria-label="Kernel version">
       <button type="button" id="sw-ok" aria-pressed="true">Correct kernel</button>
       <button type="button" id="sw-bug" aria-pressed="false">Buggy kernel: arrive before expect_tx</button>
@@ -303,7 +303,8 @@ footer h3 { margin-bottom: 10px; }
     <h2>One minimization per effect</h2>
     <div class="prose">
       <p>First the totals must balance: total arrivals equal the count from <code>mbarrier.init</code>, and the bytes announced by <code>expect_tx</code> equal the bytes landed.</p>
-      <p>Then, for each effect that is not an arrival, the checker asks for the ideal with the fewest bytes outstanding that has every arrival in it and that effect left out. Forcing the arrivals in is safe because, with the totals balanced, missing any arrival keeps the phase open anyway. If the minimum is above zero, no schedule can complete the phase without that effect. If it can reach zero, that ideal is a counterexample.</p>
+      <p>SentryWard then tries a shortcut that ignores order: it assumes any subset of the effects can run and takes the worst case. In this kernel the shortcut fails for both versions. Ignoring order, both arrivals and both landings could run without <code>expect_tx</code>, which leaves −1024 bytes, so the shortcut cannot rule anything out. Only the order expect_tx → TMA issue → landing excludes that, and only the solver uses order. (A fused <code>arrive.expect_tx</code> with a single arrival would pass the shortcut with no solver call.)</p>
+      <p>The solver works as follows. For each effect that is not an arrival, the checker asks for the ideal with the fewest bytes outstanding that has every arrival in it and that effect left out. Forcing the arrivals in is safe because, with the totals balanced, missing any arrival keeps the phase open anyway. If the minimum is above zero, no schedule can complete the phase without that effect. If it can reach zero, that ideal is a counterexample.</p>
     </div>
     <div class="chips" id="chips"></div>
     <div class="rows" id="rows" role="group" aria-label="Solver queries"></div>
@@ -315,7 +316,7 @@ footer h3 { margin-bottom: 10px; }
         <ul>
           <li>Each effect becomes a node between a source <b>s</b> and a sink <b>t</b>. A landing that removes bytes gets an edge from s with that capacity. An <code>expect_tx</code> that adds bytes gets an edge to t.</li>
           <li>Each ordering u → v becomes an edge v → u with infinite capacity. If v is on the source side and u is not, the cut would be infinite, so the source side is always an ideal.</li>
-          <li>Arrivals get an infinite edge from s, and the left-out effect gets one to t.</li>
+          <li>Arrivals get an infinite edge from s (<span class="mono">∞ in</span>), and the left-out effect gets one to t (<span class="mono">∞ out</span>).</li>
           <li>After max-flow, the nodes still reachable from s form the minimizing ideal. Its byte count is the cut minus all bytes removed by landings.</li>
         </ul>
         <div class="sum" id="sum"></div>
@@ -394,6 +395,7 @@ footer h3 { margin-bottom: 10px; }
     <div>
       <h3>Where this lives in the code</h3>
       <ul>
+        <li><code>TryBoundPhaseWithoutDependencies</code> in <code>cpp/src/analysis/phase_algebra.cpp</code>: the shortcut that ignores order. The solver runs only when it cannot decide.</li>
         <li><code>CheckProperPrefixes</code> and <code>ProperPrefixQuery</code> in <code>cpp/src/analysis/phase_boundary.cpp</code>: one solver call per non-arrival effect, with arrivals in <code>force_in</code> and the effect in <code>force_out</code>. A minimum of 0 or less fails with <code>kPrematurePhaseCompletion</code>, and the ideal becomes the witness.</li>
         <li><code>MinimumWeightIdealSolver</code> in <code>cpp/include/sentryward/algorithm/solver/minimum_weight_ideal.h</code>, built on the Dinic max-flow in <code>solver/dinic.h</code>.</li>
         <li><code>AddCompletedPhase</code> in <code>cpp/src/analysis/happens_before_graph.cpp</code> adds the completion event. It is <code>kUrgentDerived</code> and has no actor.</li>
@@ -422,36 +424,40 @@ const TMA = "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_t
 
 const SC = {
   ok: {
-    expected: 1, cols: 7, pX: 4,
+    expected: 2, cols: 8, pX: 5,
     code: [
-      ['c', 'mbarrier.init.shared.b64 [bar], 1;                    // phase 0 expects 1 arrival'],
+      ['c', 'mbarrier.init.shared.b64 [bar], 2;                    // phase 0 expects 2 arrivals'],
       ['', ''],
       ['c', '// T0, producer'],
-      ['', 'mbarrier.arrive.expect_tx.shared.b64 _, [bar], 1024;   // arrive and announce 1024 B'],
+      ['', 'mbarrier.expect_tx.shared.b64 [bar], 1024;            // announce 1024 B'],
+      ['', 'mbarrier.arrive.shared.b64 _, [bar];'],
       ['', TMA + ' [A], [tmapA, {0, 0}], [bar];  // 512 B'],
       ['', TMA + ' [B], [tmapB, {0, 0}], [bar];  // 512 B'],
       ['', ''],
       ['c', '// T1, consumer'],
+      ['', 'mbarrier.arrive.shared.b64 _, [bar];                  // ready for the tiles'],
       ['', 'ld.global.f32 c, [C];'],
       ['', 'mbarrier.try_wait.parity.shared.b64 p, [bar], 0;'],
       ['', 'ld.shared.f32 x, [A];'],
     ],
     nodes: [
-      { id: "a", lane: 0, x: 0, label: "arrive.expect_tx", sub: "+1 arrival · +1024 B", arr: 1, tx: 1024 },
-      { id: "iA", lane: 0, x: 1, label: "TMA A issue", sub: "cp.async.bulk" },
-      { id: "iB", lane: 0, x: 2, label: "TMA B issue", sub: "cp.async.bulk" },
-      { id: "xA", lane: 1, x: 2, label: "A lands", sub: "−512 B", tx: -512 },
-      { id: "xB", lane: 1, x: 3, label: "B lands", sub: "−512 B", tx: -512 },
+      { id: "e", lane: 0, x: 0, label: "expect_tx", sub: "+1024 B", tx: 1024 },
+      { id: "a", lane: 0, x: 1, label: "mbarrier.arrive", sub: "+1 arrival", arr: 1, tx: 0 },
+      { id: "iA", lane: 0, x: 2, label: "TMA A issue", sub: "cp.async.bulk" },
+      { id: "iB", lane: 0, x: 3, label: "TMA B issue", sub: "cp.async.bulk" },
+      { id: "xA", lane: 1, x: 3, label: "A lands", sub: "−512 B", tx: -512 },
+      { id: "xB", lane: 1, x: 4, label: "B lands", sub: "−512 B", tx: -512 },
+      { id: "c", lane: 3, x: 0, label: "arrive (ready)", sub: "+1 arrival", arr: 1, tx: 0 },
       { id: "q", lane: 3, x: 1, label: "ld.global C", sub: "unrelated load" },
-      { id: "w", lane: 3, x: 5, label: "try_wait", sub: "passes after phase 0", wait: true },
-      { id: "r", lane: 3, x: 6, label: "ld.shared A", sub: "reads tile A", reads: "xA" },
+      { id: "w", lane: 3, x: 6, label: "try_wait", sub: "passes after phase 0", wait: true },
+      { id: "r", lane: 3, x: 7, label: "ld.shared A", sub: "reads tile A", reads: "xA" },
     ],
-    edges: [["a", "iA", "po"], ["iA", "iB", "po"], ["iA", "xA", "async"], ["iB", "xB", "async"], ["q", "w", "po"], ["w", "r", "po"]],
+    edges: [["e", "a", "po"], ["a", "iA", "po"], ["iA", "iB", "po"], ["iA", "xA", "async"], ["iB", "xB", "async"], ["c", "q", "po"], ["q", "w", "po"], ["w", "r", "po"]],
   },
   bug: {
-    expected: 1, cols: 8, pX: 5,
+    expected: 2, cols: 8, pX: 5,
     code: [
-      ['c', 'mbarrier.init.shared.b64 [bar], 1;                    // phase 0 expects 1 arrival'],
+      ['c', 'mbarrier.init.shared.b64 [bar], 2;                    // phase 0 expects 2 arrivals'],
       ['', ''],
       ['c', '// T0, producer'],
       ['hl', 'mbarrier.arrive.shared.b64 _, [bar];                  // arrives first'],
@@ -460,6 +466,7 @@ const SC = {
       ['', TMA + ' [B], [tmapB, {0, 0}], [bar];  // 512 B'],
       ['', ''],
       ['c', '// T1, consumer'],
+      ['', 'mbarrier.arrive.shared.b64 _, [bar];                  // ready for the tiles'],
       ['', 'ld.global.f32 c, [C];'],
       ['', 'mbarrier.try_wait.parity.shared.b64 p, [bar], 0;'],
       ['', 'ld.shared.f32 x, [A];'],
@@ -471,11 +478,12 @@ const SC = {
       { id: "iB", lane: 0, x: 3, label: "TMA B issue", sub: "cp.async.bulk" },
       { id: "xA", lane: 1, x: 3, label: "A lands", sub: "−512 B", tx: -512 },
       { id: "xB", lane: 1, x: 4, label: "B lands", sub: "−512 B", tx: -512 },
+      { id: "c", lane: 3, x: 0, label: "arrive (ready)", sub: "+1 arrival", arr: 1, tx: 0 },
       { id: "q", lane: 3, x: 1, label: "ld.global C", sub: "unrelated load" },
       { id: "w", lane: 3, x: 6, label: "try_wait", sub: "passes after phase 0", wait: true },
       { id: "r", lane: 3, x: 7, label: "ld.shared A", sub: "reads tile A", reads: "xA" },
     ],
-    edges: [["a", "e", "po"], ["e", "iA", "po"], ["iA", "iB", "po"], ["iA", "xA", "async"], ["iB", "xB", "async"], ["q", "w", "po"], ["w", "r", "po"]],
+    edges: [["a", "e", "po"], ["e", "iA", "po"], ["iA", "iB", "po"], ["iA", "xA", "async"], ["iB", "xB", "async"], ["c", "q", "po"], ["q", "w", "po"], ["w", "r", "po"]],
   },
 };
 
@@ -683,7 +691,7 @@ function renderFlow(svg, sc, row) {
     const cls = "fe " + (ed.kind === "order" ? "order" : (ed.kind === "forcein" || ed.kind === "forceout") ? "force" : "") + (ed.cut ? " cut" : "");
     const mk = ed.cut ? "bad" : cls.includes("force") ? "accent" : "muted";
     svg.appendChild(el("path", { d, class: cls, "marker-end": `url(#${svg.id}-m-${mk})` }));
-    const txt = ed.c >= INF ? (ed.kind === "forcein" ? "∞ must be in" : ed.kind === "forceout" ? "∞ left out" : "∞") : String(ed.c);
+    const txt = ed.c >= INF ? (ed.kind === "forcein" ? "∞ in" : ed.kind === "forceout" ? "∞ out" : "∞") : String(ed.c);
     labels.push({ lx, ly, txt, cut: ed.cut });
   }
   for (const L of labels) {
@@ -793,11 +801,12 @@ function renderSolve() {
   sc.rows.forEach((r, i) => {
     const b = document.createElement("button");
     b.type = "button"; b.className = "row"; b.setAttribute("aria-pressed", String(i === sel));
-    const early = r.mc.weight <= 0;
+    const early = r.mc.feasible && r.mc.weight <= 0;
+    const ideal = r.mc.feasible ? `{ ${names(sc, sc.effects.filter(e => r.mc.side.has(e.id)).map(e => e.id))} }` : "none: an arrival comes after it";
     b.innerHTML = `
       <span><span class="k">Leave out</span><span class="v mono">${r.om.label}</span></span>
-      <span class="ideal"><span class="k">Best partial run (ideal)</span><span class="v">{ ${names(sc, sc.effects.filter(e => r.mc.side.has(e.id)).map(e => e.id))} }</span></span>
-      <span><span class="k">Bytes outstanding</span><span class="num">${fmtB(r.mc.weight)}</span></span>
+      <span class="ideal"><span class="k">Best partial run (ideal)</span><span class="v">${ideal}</span></span>
+      <span><span class="k">Bytes outstanding</span><span class="num">${r.mc.feasible ? fmtB(r.mc.weight) : "–"}</span></span>
       <span class="pill ${early ? "bad" : "ok"}">${early ? "completes early" : "cannot complete"}</span>`;
     b.addEventListener("click", () => { sel = i; renderSolve(); });
     rows.appendChild(b);
@@ -805,17 +814,21 @@ function renderSolve() {
 
   const r = sc.rows[sel];
   renderGraph($("g-solve"), sc, {
-    nodeClass: n => !isEffect(n) ? "n-dim" : n.id === r.om.id ? "n-omit" : r.mc.side.has(n.id) ? "n-in" : "n-out",
+    nodeClass: n => !isEffect(n) ? "n-dim" : n.id === r.om.id ? "n-omit" : (r.mc.feasible ? r.mc.side.has(n.id) : n.arr) ? "n-in" : "n-out",
     edgeClass: () => "e-faint",
   });
   renderFlow($("g-flow"), sc, r);
   const cut = r.mc.net.filter(e => e.cut).map(e => e.c);
-  $("sum").innerHTML =
-    `cut &nbsp;= ${cut.join(" + ") || "0"} = ${r.mc.flow}<br>` +
-    `bytes removed by landings = ${r.mc.landing}<br>` +
-    `minimum outstanding = ${r.mc.flow} − ${r.mc.landing} = <b>${fmtB(r.mc.weight)}</b>` +
-    (r.mc.weight <= 0 ? " ≤ 0, so the phase can complete early" : " > 0, so this effect is always needed");
-  $("brute").textContent = `Check by brute force: the effect graph has ${sc.ideals.length} ideals, ${r.constrained} of which contain every arrival and leave out ${r.om.label}. Their minimum is ${fmtB(r.best.w)} B, the same answer the cut gives.`;
+  $("sum").innerHTML = !r.mc.feasible
+    ? `cut = ∞: a path of infinite edges runs from s through an arrival to ${r.om.label} and on to t.<br>` +
+      `No ideal can hold every arrival and leave out ${r.om.label}, so this effect is always needed.`
+    : `cut &nbsp;= ${cut.join(" + ") || "0"} = ${r.mc.flow}<br>` +
+      `bytes removed by landings = ${r.mc.landing}<br>` +
+      `minimum outstanding = ${r.mc.flow} − ${r.mc.landing} = <b>${fmtB(r.mc.weight)}</b>` +
+      (r.mc.weight <= 0 ? " ≤ 0, so the phase can complete early" : " > 0, so this effect is always needed");
+  $("brute").textContent = r.best
+    ? `Check by brute force: the effect graph has ${sc.ideals.length} ideals, ${r.constrained} of which ${r.constrained === 1 ? "contains" : "contain"} every arrival and leave out ${r.om.label}. Their minimum is ${fmtB(r.best.w)} B, the same answer the cut gives.`
+    : `Check by brute force: none of the ${sc.ideals.length} ideals of the effect graph contains every arrival and leaves out ${r.om.label}.`;
 }
 
 function renderAfter() {
@@ -826,7 +839,7 @@ function renderAfter() {
   if (cur === "ok") {
     $("after-switch").hidden = false;
     text.append(
-      para("Every query came back above zero, so phase 0 completes only after all of its effects in every schedule. The checker now adds a derived <code>phase 0 complete</code> event, with an edge from each effect and an edge to the wait that observes the phase. It belongs to no thread."),
+      para("No query found an ideal with zero bytes outstanding, so phase 0 completes only after all of its effects in every schedule. The checker now adds a derived <code>phase 0 complete</code> event, with an edge from each effect and an edge to the wait that observes the phase. It belongs to no thread."),
       para("The race check then only asks about paths. TMA A writes tile A and <code>ld.shared A</code> reads it. If some path connects them, every schedule orders them."));
     const showP = afterMode === "after";
     const path = showP ? findPath(sc, "xA", "r") : null;
