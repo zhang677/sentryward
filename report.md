@@ -115,6 +115,148 @@ producer's arrive happens before the consumer's wait returns") holds in every
 schedule. Since the reference run terminated, every schedule terminates, so the
 kernel cannot deadlock.
 
+### Foundations
+
+This section states what the check assumes, what it proves and why each stage
+is needed. The stages themselves are listed in
+[How it is checked](#how-it-is-checked).
+
+**Axioms.** These are SentryWard's model, assumed and not proved:
+
+1. **Fixed events.** Specialization (section 1) produces a fixed, finite set of
+   events. Every schedule runs the same events; only their order differs.
+   Control flow that depends on data is reported `unsupported`.
+2. **Legal schedules.** A schedule is a total order of all events that respects
+   the structural edges (program order, issue before completion, …) and the
+   barrier rules: a wait done runs only after its target phase has completed,
+   and no arrival underflow, transaction overflow or similar violation occurs.
+3. **Barrier counters.** A barrier is always in some current phase. Each effect
+   changes the pending arrivals and pending TMA bytes by its weights. The phase
+   completes at the moment both reach zero, and the next phase starts with the
+   expected arrival count and zero bytes.
+4. **Wait targets.** A wait's target phase is fixed when it is issued
+   (`issuedTarget` in `cpp/src/semantics/simulator.cpp`). A parity-p wait
+   issued while the barrier is in phase k targets k if p = k mod 2, and blocks
+   until k completes. Otherwise it targets k−1, which has already completed,
+   and returns immediately.
+5. **Immediate visibility.** Every event is atomic and visible to all threads at
+   once. Only the race check depends on this (see
+   [The memory-model gap](#the-memory-model-gap)).
+
+**What is proved.** The reference run produces a *classification* C: the phase
+each effect lands in and the phase each wait observes. The kernel is
+well-synchronized if every legal schedule produces C. The reference run shows
+only that one legal schedule exists, and a badly synchronized kernel usually
+has one. If, in the example below, the producer does not wait on `E`, the
+schedule `a0, a1, wF0, …` is legal. When `wF0` is issued, `F` is already in
+phase 2, which has parity 0, so `wF0` targets phase 2 instead of phase 0. The
+reference run need not produce that schedule. Its role is to propose C; the
+remaining stages prove C for all schedules or find a counterexample.
+
+**The proof tool.** The check never enumerates schedules. It relies on one
+invariant:
+
+> **I.** Every edge `u → v` in the HB graph means u runs before v in every
+> legal schedule.
+
+Two facts follow:
+
+- A path `u ⇝ v` also means u runs before v in every legal schedule. Every
+  "HB-before" below is a reachability query on the current graph
+  (`ReachabilityOracle`, `cpp/include/sentryward/algorithm/analysis/reachability.h`).
+- At any moment of any legal schedule, the events that have run form an ideal.
+  A property that fails for every ideal therefore fails at every moment of
+  every schedule, and the min-cut solver can search over ideals.
+
+The ideals over-approximate the reachable states. A graph with few edges admits
+impossible states, so a failed proof may be a false alarm, but a passed proof
+is never wrong.
+
+**Facts proved for each phase.** Let Eₙ be the effects C assigns to phase n of
+a barrier.
+
+| Fact | Stage | Statement | Why it is needed |
+|---|---|---|---|
+| S. Separation | 2a | every effect of Eₙ is HB-after every effect of Eₙ₋₁ (for phase 0: after the `mbarrier.init`) | chained over all phases, all of E₀ runs before any of E₁, all of E₁ before any of E₂, and so on |
+| B. Balance | 2b | the arrivals of Eₙ sum to the expected count, and its bytes net to zero | once all of Eₙ has run, the phase has completed |
+| N. No early completion | 2b | no ideal that omits an effect of Eₙ has both counters at zero | the phase cannot complete before its last effect runs |
+
+By S, while phase n is current only effects of Eₙ change the counters: earlier
+phases' effects have all run and later ones have not started. The effects of
+Eₙ that have run form an ideal, so by N the counters are not both zero until
+all of Eₙ has run, and by B they are once it has. Phase n therefore completes
+exactly when its last effect runs, and every effect lands in its assigned
+phase (item 1 of the definition).
+
+The solver queries of 2b establish N. Arrivals sum to exactly the expected
+count, so an ideal missing one still has arrivals pending; only ideals with
+every arrival need to be searched. For each non-arrival effect X, a minimum
+pending byte count above zero with X forced out shows that the phase cannot
+complete without X. The nonnegativity query is what makes a minimum of zero or
+less mean exactly zero, a real early completion. When it fails, the result is
+`unsupported` rather than a rejection, unless `reject_negative_tx` is set
+(`cpp/src/checker/wellsync_checker.cpp`).
+
+The other stages prove the remaining items of the definition:
+
+- **W. Waits** (stage 4, `cpp/src/analysis/wait_checker.cpp`). For a wait that
+  C says observes phase n: every effect of Eₙ₋₁ is HB-before the wait issue,
+  so phase n−1 has completed when the wait is issued. Some effect of Eₙ₊₁ is
+  HB-after the wait issue, so phase n+1 has not completed. The wait's parity
+  is n mod 2. By axiom 4, a wait issued in phase n or n+1 with that parity
+  targets phase n.
+- **O. Open phases** (stage 3). A phase incomplete at the end of the reference
+  run has a counter above zero in every ideal, so it never completes.
+- **L. Lifecycle** (stage 5, `cpp/src/analysis/lifecycle_checker.cpp`). Each
+  arrival of phase n > 0 is HB-after the done of some wait that observed phase
+  n−1, so the barrier is not re-armed before its previous phase was observed.
+
+**Why the graph must grow.** The initial graph holds only structural edges,
+which satisfy I by axiom 2. Most of them stay inside one thread or one
+operation, but the facts above need orderings between threads, and those come
+only from barriers. Each certified phase therefore adds the edges listed in
+[How the HB graph grows](#how-the-hb-graph-grows); each one holds in every
+schedule because of the facts just proved. Without them, the proofs for later
+phases fail. Consider two barriers `F` and `E`, each with count 1:
+
+```
+P:  a0 = arrive F  →  wE = wait E(0)  →  a1 = arrive F
+C:  wF0 = wait F(0)  →  read  →  c0 = arrive E
+```
+
+C assigns `a0` to `F` phase 0, `c0` to `E` phase 0 and `a1` to `F` phase 1.
+Certifying `F` phase 0 adds `a0 → done_F0 → wF0 done`. Certifying `E` phase 0
+adds `c0 → done_E0 → wE done`. Fact W for `wF0` then needs some effect of `F`
+phase 1 to be HB-after `wF0`'s issue. The only path is
+
+```
+wF0 issue → wF0 done → read → c0 → done_E0 → wE done → a1
+```
+
+and it exists only because `E` phase 0 was certified first.
+
+**Why trace order.** In the reference run, every effect of phase n ran before
+phase n completed. Any wait that effect depends on observed a phase that
+completed even earlier, so that phase comes earlier in the trace order, and
+its edges are in the graph when phase n is checked.
+
+**Soundness.** An edge added in stage 2c relies on facts checked later:
+`doneₙ → wait done` relies on W (stage 4), and `effect → doneₙ` relies on S for
+phase n+1. Invariant I is therefore established only once every stage has
+passed, not as each edge is added. The intended argument runs by contradiction:
+
+1. Suppose every stage passes, yet some legal schedule σ disagrees with C.
+2. Take the earliest event of σ at which it disagrees: an effect landing in
+   the wrong phase, a phase completing early, or a wait targeting the wrong
+   phase.
+3. Before that event σ agrees with C, so every edge whose justification
+   concerns that prefix holds on it.
+4. The fact covering the disagreeing event then rules it out.
+
+No written proof of this exists in the repository. Step 3 is the delicate part:
+phases of different barriers can complete in a different order in σ than in
+the reference run, so "the prefix" must be defined with care.
+
 ### How it is checked
 
 The check is an induction over phases in the order the reference run completed
@@ -214,7 +356,7 @@ justifies it:
 | Edge | Added by | Justified because |
 |---|---|---|
 | each effect of phase n → `doneₙ` (`kCertifiedPhaseCompletion`) | stage 2c | stages 2a and 2b proved these are exactly the effects that complete phase n, in every schedule |
-| `doneₙ` → each wait done that observed phase n (`kWaitRelease`) | stage 2c | the wait can only return once the phase has completed |
+| `doneₙ` → each wait done that observed phase n (`kWaitRelease`) | stage 2c | a wait done runs only after its target phase has completed, and the wait check (stage 4) proves the target is phase n |
 | `doneₙ₋₁` → each effect of phase n (`kCertifiedPreviousPhase`) | stage 2a; the wait check adds the same kind of edge to wait issues | every effect of phase n−1 was already shown to reach that node |
 
 Only the `kWaitRelease` edges create new orderings between real events. The
